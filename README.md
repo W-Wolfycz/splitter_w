@@ -1,2 +1,34 @@
-# splitter_w
-AstrBot splitter插件
+# 分段对话·改
+
+魔改自 [nuomicici/astrbot_plugin_splitter](https://github.com/nuomicici/astrbot_plugin_splitter)。
+
+将 LLM 长文本智能切割为多段短消息，配合可调延迟算法模拟真人输入节奏。
+
+## 与原版的区别
+
+- **仅正则分段**：移除 Simple 模式，仅保留正则表达式分段，正则引擎换为 `regex`，支持 `\p{Extended_Pictographic}` 等 Unicode 属性
+- **符号保护对**：可配置成对符号（括号、引号等），内部内容不被切分；支持保护对分段阈值，达到指定长度后在闭合处立即分段
+- **回复逻辑简化**：`enable_reply` 为总开关，`enable_smart_reply` 为子选项（仅插嘴时回复）；关闭时不触碰 Reply 组件
+- **移除配置迁移**：不兼容旧版配置
+
+## 功能
+
+- **正则分段**：使用 `regex` 引擎匹配分段点，支持 Unicode 属性
+- **符号保护**：用户自定义成对符号，栈跟踪防止内部被切分；可设阈值在长保护对闭合后分段
+- **代码块/推理保护**：自动识别 ` ``` ` 代码块和 `<think >` 推理标签，内部不切分
+- **文本清理**：分段前后各执行一次正则清理
+- **拟真延迟**：线性、对数、随机、固定四种策略
+- **组件控制**：图片、At、表情等非文本组件可设独立发送策略
+- **智能均分**：根据总字数与段数上限尽量均衡每段长度
+
+## 配置
+
+通过 AstrBot 管理面板配置，`_conf_schema.json` 定义所有选项及默认值。
+
+## 依赖
+
+- `regex`（已在 `requirements.txt` 中声明）
+
+## 致谢
+
+- 原作者 [糯米茨](https://github.com/nuomicici)
