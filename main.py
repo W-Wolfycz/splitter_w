@@ -184,7 +184,7 @@ class MessageSplitterPlugin(Star):
                 comp.text = comp.text.replace("​ ​", "__ZWSP_DOUBLE__").replace("​", "__ZWSP_SINGLE__")
 
         # --- 4. 构建正则 ---
-        split_pattern = self._get_cfg("split_regex", r"[。？！?!\\n…]+")
+        split_pattern = self._get_cfg("split_regex", r"[。？！？!\n…]+")
 
         # --- 5. 执行切分 ---
         strategies = {
@@ -194,20 +194,8 @@ class MessageSplitterPlugin(Star):
             "default": self._get_cfg("other_media_strategy", "跟随下段"),
         }
 
-        segments = self._split_chain(result.chain, split_pattern, strategies)
+        segments = self._split_chain(result.chain, split_pattern, strategies, min_seg_cancel)
         logger.info("[Splitter] 切分完成: {}段, text_len={}".format(len(segments), total_text_len))
-
-        # 碎片段合并
-        if min_seg_cancel > 0 and len(segments) > 1:
-            i = 0
-            while i < len(segments) - 1:
-                seg_len = sum(len(c.text) for c in segments[i] if isinstance(c, Plain))
-                if seg_len < min_seg_cancel:
-                    segments[i + 1] = segments[i] + segments[i + 1]
-                    segments.pop(i)
-                    logger.debug("[Splitter] 碎片段合并: {}字 < 阈值{}".format(seg_len, min_seg_cancel))
-                else:
-                    i += 1
 
         # 强制分段上限控制
         if max_segs > 0 and len(segments) > max_segs:
@@ -311,14 +299,14 @@ class MessageSplitterPlugin(Star):
         if strategy == "linear": return self._get_cfg("linear_base", 0.5) + (len(text) * self._get_cfg("linear_factor", 0.1))
         return self._get_cfg("fixed_delay", 1.5)
 
-    def _split_chain(self, chain: List[BaseMessageComponent], pattern: str, strategies: Dict[str, str]) -> List[List[BaseMessageComponent]]:
+    def _split_chain(self, chain: List[BaseMessageComponent], pattern: str, strategies: Dict[str, str], min_seg_cancel: int = 0) -> List[List[BaseMessageComponent]]:
         compiled = re.compile(pattern)
         pair_split_len = self._get_cfg("protected_split_length", 0)
         segments = []; buffer = []
         for comp in chain:
             if isinstance(comp, Plain):
                 if not comp.text: continue
-                self._process_text(comp.text, compiled, pair_split_len, segments, buffer)
+                self._process_text(comp.text, compiled, pair_split_len, min_seg_cancel, segments, buffer)
             else:
                 c_type = type(comp).__name__.lower()
                 if "reply" in c_type:
@@ -339,7 +327,7 @@ class MessageSplitterPlugin(Star):
         if buffer: segments.append(buffer)
         return [s for s in segments if s]
 
-    def _process_text(self, text: str, compiled, pair_split_len: int, segments: list, buffer: list):
+    def _process_text(self, text: str, compiled, pair_split_len: int, min_seg_cancel: int, segments: list, buffer: list):
         stack = []; i = 0; n = len(text); chunk = ""
 
         while i < n:
@@ -359,6 +347,10 @@ class MessageSplitterPlugin(Star):
                 if should and "\n" not in delim and re.match(r"^[ \t.?!,;:\-']+$", delim):
                     p_c = text[i-1] if i > 0 else ""; n_c = text[i+len(delim)] if i+len(delim) < n else ""
                     if re.match(r"^[a-zA-Z0-9 \t.?!,;:\-']$", p_c) and re.match(r"^[a-zA-Z0-9 \t.?!,;:\-']$", n_c): should = False
+                if should and min_seg_cancel > 0:
+                    total_len = sum(len(c.text) for c in buffer if isinstance(c, Plain)) + len(chunk)
+                    if total_len < min_seg_cancel:
+                        should = False
                 if should:
                     chunk += delim; buffer.append(Plain(chunk))
                     segments.append(buffer[:]); buffer.clear(); chunk = ""; i += len(delim)
@@ -379,7 +371,7 @@ class MessageSplitterPlugin(Star):
 
             chunk += char; i += 1
 
-            if pair_closed_pos >= 0 and not stack and pair_split_len > 0 and (i - pair_closed_pos) >= pair_split_len:
+            if pair_closed_pos >= 0 and not stack and pair_split_len > 0 and len(chunk) >= pair_split_len:
                 buffer.append(Plain(chunk))
                 segments.append(buffer[:]); buffer.clear(); chunk = ""
 
