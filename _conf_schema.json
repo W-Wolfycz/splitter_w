@@ -17,12 +17,6 @@
         "options": ["llm_only", "all"],
         "default": "llm_only"
       },
-      "max_length_no_split": {
-        "description": "最短触发字数",
-        "hint": "文本少于该字数时不分段；填 0 关闭。",
-        "type": "int",
-        "default": 0
-      },
       "max_length_to_disable": {
         "description": "最长处理字数",
         "hint": "文本超过该字数时直接跳过分段；填 0 关闭。",
@@ -46,50 +40,20 @@
   "split_settings": {
     "description": "分段规则",
     "type": "object",
-    "hint": "控制如何识别分段点。",
+    "hint": "由 LLM 通过 \\n 控制分段点。",
     "items": {
-      "split_regex": {
-        "description": "正则分隔式",
-        "hint": "用于匹配分段点的正则表达式，使用 regex 引擎，支持 \\p{} Unicode 属性。",
-        "type": "string",
-        "default": "[。？！?!\\n…]+"
-      },
-      "max_segments": {
-        "description": "最大段数",
-        "hint": "超出时将多余段合并到最后一段；填 0 不限制。",
-        "type": "int",
-        "default": 7
-      },
-      "min_segment_cancel": {
-        "description": "碎片段合并阈值",
-        "hint": "分段后若存在短于此值的文本段，将其合并到相邻段；填 0 关闭。",
-        "type": "int",
-        "default": 0
-      },
       "trim_segment_edge_blank_lines": {
         "description": "清理首尾空行",
         "hint": "仅清理每段两端空行，不影响段内换行。",
         "type": "bool",
         "default": true
-      },
-      "protected_pairs": {
-        "description": "符号保护对",
-        "hint": "每项为一个含两个字符的字符串（多取前两字符），符号对及其内部内容不会被切分。",
-        "type": "list",
-        "default": ["“”", "《》", "（）", "()", "[]", "{}", "‘’", "【】", "<>", "\"\"", "''", "``"]
-      },
-      "protected_split_length": {
-        "description": "保护对分段阈值",
-        "hint": "保护对闭合时，若当前累计文本（含保护对前方内容）长度达到该值则立即分段；填 0 关闭。",
-        "type": "int",
-        "default": 0
       }
     }
   },
   "clean_settings": {
     "description": "文本清理",
     "type": "object",
-    "hint": "控制分段前后的文本删除与脱敏。",
+    "hint": "控制分段前后的文本清理。",
     "items": {
       "clean_before_regex": {
         "description": "前置清理正则",
@@ -97,17 +61,11 @@
         "type": "string",
         "default": ""
       },
-      "clean_after_regex": {
-        "description": "后置清理正则",
-        "hint": "在分段后逐段执行正则清理。",
-        "type": "string",
-        "default": ""
-      },
-      "inject_kaomoji_prompt": {
-        "description": "颜文字保护",
-        "hint": "在请求前追加提示，减少颜文字被错误切分。",
-        "type": "bool",
-        "default": true
+      "clean_after_chars": {
+        "description": "句尾清理符号",
+        "hint": "从每段末尾向前逐字符移除列表中的符号，遇到不在列表内的字符即停止。",
+        "type": "list",
+        "default": []
       }
     }
   },

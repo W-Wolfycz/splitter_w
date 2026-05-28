@@ -1,15 +1,14 @@
 # main.py
-import regex as re
 import math
 import random
 import asyncio
+import re
 from collections import defaultdict, deque
 from typing import List, Dict, Any
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.message_components import Plain, BaseMessageComponent, Reply, Record
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 
@@ -18,16 +17,8 @@ class MessageSplitterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-
         self._message_queues = defaultdict(deque)
         self._last_smart_reply_mark = {}
-
-        self.protected_pairs = []
-        for pair_str in self._get_cfg("protected_pairs", []):
-            if not pair_str: continue
-            chars = str(pair_str)[:2]
-            if len(chars) < 2: continue
-            self.protected_pairs.append((chars[0], chars[1]))
 
     def _get_cfg(self, key: str, default: Any = None) -> Any:
         categories = [
@@ -97,31 +88,6 @@ class MessageSplitterPlugin(Star):
             return
         self._remember_incoming_message(event)
 
-    @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        if not self._get_cfg("inject_kaomoji_prompt", True): return
-        instruction = (
-            "\n【特别注意】如果你需要输出颜文字（如 (QAQ)），请务必使用三对反引号包裹，"
-            "格式如：```(QAQ)```。这能确保颜文字作为一个整体被发送，不会被分段工具切断。"
-        )
-        req.system_prompt += instruction
-
-    @filter.on_llm_response()
-    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        setattr(event, "__is_llm_reply", True)
-
-    def _is_model_generated_reply(self, event: AstrMessageEvent, result) -> bool:
-        if not result: return False
-        is_model_result = getattr(result, "is_model_result", None)
-        if callable(is_model_result):
-            try: return bool(is_model_result())
-            except: pass
-        content_type = getattr(result, "result_content_type", None)
-        if content_type is not None:
-            type_name = getattr(content_type, "name", "")
-            return type_name in {"LLM_RESULT", "AGENT_RUNNER_ERROR", "AGENT_RUNNER_RESULT", "TOOL_RESULT", "TOOL_CALL"}
-        return getattr(event, "__is_llm_reply", False)
-
     @filter.on_decorating_result(priority=-100000000000000000)
     async def on_decorating_result(self, event: AstrMessageEvent):
         result = event.get_result()
@@ -147,17 +113,12 @@ class MessageSplitterPlugin(Star):
             return
 
         split_scope = self._get_cfg("split_scope", "llm_only")
-        is_llm_reply = self._is_model_generated_reply(event, result)
-        if split_scope == "llm_only" and not is_llm_reply:
-            logger.debug("[Splitter] 跳过: 非LLM回复 (scope={}, is_llm={})".format(split_scope, is_llm_reply))
+        if split_scope == "llm_only" and not result.is_llm_result():
+            logger.debug("[Splitter] 跳过: 非LLM回复 (scope={})".format(split_scope))
             return
 
         # --- 2. 长度校验 ---
         total_text_len = sum(len(c.text) for c in result.chain if isinstance(c, Plain))
-        max_len_no_split = self._get_cfg("max_length_no_split", 0)
-        if max_len_no_split > 0 and total_text_len < max_len_no_split:
-            logger.debug("[Splitter] 跳过: 文本过短 ({}<{})".format(total_text_len, max_len_no_split))
-            return
         max_len_disable = self._get_cfg("max_length_to_disable", 0)
         if max_len_disable > 0 and total_text_len > max_len_disable:
             logger.debug("[Splitter] 跳过: 文本过长 ({}>{})".format(total_text_len, max_len_disable))
@@ -166,8 +127,6 @@ class MessageSplitterPlugin(Star):
         setattr(result, "__splitter_processed", True)
         enable_reply = self._get_cfg("enable_reply", True)
         enable_smart = self._get_cfg("enable_smart_reply", False)
-        max_segs = self._get_cfg("max_segments", 7)
-        min_seg_cancel = self._get_cfg("min_segment_cancel", 0)
 
         logger.info("[Splitter] 原文本: {}".format("".join(c.text for c in result.chain if isinstance(c, Plain)).replace('\n', '\\n')))
 
@@ -178,15 +137,12 @@ class MessageSplitterPlugin(Star):
                 if isinstance(comp, Plain) and comp.text:
                     comp.text = re.sub(clean_regex, "", comp.text, flags=re.DOTALL)
 
-        # 脱敏处理
+        # --- 5. 归一化转义换行 ---
         for comp in result.chain:
             if isinstance(comp, Plain) and comp.text:
-                comp.text = comp.text.replace("​ ​", "__ZWSP_DOUBLE__").replace("​", "__ZWSP_SINGLE__")
+                comp.text = comp.text.replace("\\n", "\n").replace("\\r", "\r")
 
-        # --- 4. 构建正则 ---
-        split_pattern = self._get_cfg("split_regex", r"[。？！？!\n…]+")
-
-        # --- 5. 执行切分 ---
+        # --- 6. 切分 ---
         strategies = {
             "image": self._get_cfg("image_strategy", "单独"),
             "at": self._get_cfg("at_strategy", "跟随下段"),
@@ -194,25 +150,10 @@ class MessageSplitterPlugin(Star):
             "default": self._get_cfg("other_media_strategy", "跟随下段"),
         }
 
-        segments = self._split_chain(result.chain, split_pattern, strategies, min_seg_cancel)
+        segments = self._split_chain(result.chain, strategies)
         logger.info("[Splitter] 切分完成: {}段, text_len={}".format(len(segments), total_text_len))
 
-        # 强制分段上限控制
-        if max_segs > 0 and len(segments) > max_segs:
-            merged_last = []
-            for seg in segments[max_segs - 1:]:
-                merged_last.extend(seg)
-
-            optimized_last = []
-            for comp in merged_last:
-                if optimized_last and isinstance(comp, Plain) and isinstance(optimized_last[-1], Plain):
-                    optimized_last[-1] = Plain(optimized_last[-1].text + comp.text)
-                else:
-                    optimized_last.append(comp)
-
-            segments = segments[:max_segs - 1] + [optimized_last]
-
-        # --- 6. 回复处理 ---
+        # --- 7. 回复处理 ---
         source_id = str(getattr(event.message_obj, "message_id", "") or "")
 
         if enable_reply and segments and source_id:
@@ -221,24 +162,26 @@ class MessageSplitterPlugin(Star):
             else:
                 self._prepend_reply(segments[0], source_id)
 
-        # --- 7. 后处理 (At/清理/TTS) ---
+        # --- 8. 后处理 (At/清理/TTS) ---
         at_strategy = strategies.get("at", "跟随下段")
         at_needs_proc = at_strategy in ["接下文", "跟随下段", "嵌入"] and any(type(c).__name__.lower() == "at" for c in result.chain)
 
-        clean_after = self._get_cfg("clean_after_regex", "")
+        clean_after_chars = "".join(self._get_cfg("clean_after_chars", []))
         for seg in segments:
             if self._get_cfg("trim_segment_edge_blank_lines", True): self._trim_segment_edge_blank_lines(seg)
-            for comp in seg:
-                if isinstance(comp, Plain) and comp.text:
-                    comp.text = comp.text.replace("__ZWSP_DOUBLE__", "​ ​").replace("__ZWSP_SINGLE__", "​")
-                    if clean_after:
-                        comp.text = re.sub(clean_after, "", comp.text, flags=re.DOTALL)
+            if clean_after_chars:
+                for comp in seg:
+                    if isinstance(comp, Plain) and comp.text:
+                        comp.text = comp.text.rstrip(clean_after_chars)
+                for comp in seg:
+                    if isinstance(comp, Plain) and comp.text:
+                        comp.text = comp.text.rstrip("".join(clean_after_chars))
 
         if len(segments) <= 1 and not at_needs_proc:
             final = segments[0] if segments else []
             result.chain.clear(); result.chain.extend(final); return
 
-        # --- 8. 发送 ---
+        # --- 9. 发送 ---
         for i in range(len(segments) - 1):
             seg_chain = segments[i]
             text_content = "".join([c.text for c in seg_chain if isinstance(c, Plain)])
@@ -299,14 +242,21 @@ class MessageSplitterPlugin(Star):
         if strategy == "linear": return self._get_cfg("linear_base", 0.5) + (len(text) * self._get_cfg("linear_factor", 0.1))
         return self._get_cfg("fixed_delay", 1.5)
 
-    def _split_chain(self, chain: List[BaseMessageComponent], pattern: str, strategies: Dict[str, str], min_seg_cancel: int = 0) -> List[List[BaseMessageComponent]]:
-        compiled = re.compile(pattern)
-        pair_split_len = self._get_cfg("protected_split_length", 0)
-        segments = []; buffer = []
+    def _split_chain(self, chain: List[BaseMessageComponent], strategies: Dict[str, str]) -> List[List[BaseMessageComponent]]:
+        segments = []
+        buffer = []
         for comp in chain:
             if isinstance(comp, Plain):
-                if not comp.text: continue
-                self._process_text(comp.text, compiled, pair_split_len, min_seg_cancel, segments, buffer)
+                if not comp.text:
+                    continue
+                parts = comp.text.split('\n')
+                for j, part in enumerate(parts):
+                    if j > 0:
+                        if buffer:
+                            segments.append(buffer[:])
+                            buffer.clear()
+                    if part:
+                        buffer.append(Plain(part))
             else:
                 c_type = type(comp).__name__.lower()
                 if "reply" in c_type:
@@ -314,65 +264,26 @@ class MessageSplitterPlugin(Star):
                     continue
                 strategy = strategies.get(c_type, strategies.get("default", "跟随下段"))
                 if strategy == "单独":
-                    if buffer: segments.append(buffer[:]); buffer.clear()
+                    if buffer:
+                        segments.append(buffer[:])
+                        buffer.clear()
                     segments.append([comp])
                 elif strategy == "跟随上段":
-                    if buffer: buffer.append(comp); segments.append(buffer[:]); buffer.clear()
-                    elif segments: segments[-1].append(comp)
-                    else: segments.append([comp])
+                    if buffer:
+                        buffer.append(comp)
+                        segments.append(buffer[:])
+                        buffer.clear()
+                    elif segments:
+                        segments[-1].append(comp)
+                    else:
+                        segments.append([comp])
                 elif strategy in ["跟随下段", "接下文"]:
-                    if buffer: segments.append(buffer[:]); buffer.clear()
+                    if buffer:
+                        segments.append(buffer[:])
+                        buffer.clear()
                     buffer.append(comp)
-                else: buffer.append(comp)
-        if buffer: segments.append(buffer)
-        return [s for s in segments if s]
-
-    def _process_text(self, text: str, compiled, pair_split_len: int, min_seg_cancel: int, segments: list, buffer: list):
-        stack = []; i = 0; n = len(text); chunk = ""
-
-        while i < n:
-            if text.startswith("```", i):
-                idx = text.find("```", i + 3)
-                if idx != -1: chunk += text[i:idx+3]; i = idx+3; continue
-                else: chunk += text[i:]; break
-            if text.startswith("<" + "think>", i):
-                idx = text.find("</" + "think>", i + 7)
-                if idx != -1: chunk += text[i:idx+8]; i = idx+8; continue
-                else: chunk += text[i:]; break
-
-            match = compiled.match(text, pos=i)
-            if match:
-                delim = match.group()
-                should = not stack or "\n" in delim
-                if should and "\n" not in delim and re.match(r"^[ \t.?!,;:\-']+$", delim):
-                    p_c = text[i-1] if i > 0 else ""; n_c = text[i+len(delim)] if i+len(delim) < n else ""
-                    if re.match(r"^[a-zA-Z0-9 \t.?!,;:\-']$", p_c) and re.match(r"^[a-zA-Z0-9 \t.?!,;:\-']$", n_c): should = False
-                if should and min_seg_cancel > 0:
-                    total_len = sum(len(c.text) for c in buffer if isinstance(c, Plain)) + len(chunk)
-                    if total_len < min_seg_cancel:
-                        should = False
-                if should:
-                    chunk += delim; buffer.append(Plain(chunk))
-                    segments.append(buffer[:]); buffer.clear(); chunk = ""; i += len(delim)
                 else:
-                    chunk += delim; i += len(delim)
-                continue
-
-            char = text[i]
-            pair_closed_pos = -1
-            if stack and char == stack[-1][0]:
-                pair_closed_pos = stack[-1][1]
-                stack.pop()
-            else:
-                for o, c in self.protected_pairs:
-                    if char == o:
-                        stack.append((c, i))
-                        break
-
-            chunk += char; i += 1
-
-            if pair_closed_pos >= 0 and not stack and pair_split_len > 0 and len(chunk) >= pair_split_len:
-                buffer.append(Plain(chunk))
-                segments.append(buffer[:]); buffer.clear(); chunk = ""
-
-        if chunk: buffer.append(Plain(chunk))
+                    buffer.append(comp)
+        if buffer:
+            segments.append(buffer)
+        return [s for s in segments if s]
