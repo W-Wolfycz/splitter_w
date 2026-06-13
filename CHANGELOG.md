@@ -1,5 +1,15 @@
 # 更新日志
 
+## 2.0.0
+> 2026-06-13
+
+- 统一所有日志前缀为 `[SplitterW]`
+- 新增 `log_config` 配置组（替换原 `basic_settings.debug_mode`）：
+  - `log_with_bot_id`：日志前缀附加机器人实例 ID
+  - `debug_to_info`：debug 日志提级为 info 输出
+
+---
+
 ## 1.2.0
 > 2026-05-25
 

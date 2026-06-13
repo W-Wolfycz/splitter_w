@@ -40,32 +40,63 @@
   "split_settings": {
     "description": "分段规则",
     "type": "object",
-    "hint": "由 LLM 通过 \\n 控制分段点。",
+    "hint": "控制分段点、首尾清理与句尾符号清理。",
     "items": {
+      "extra_split_points": {
+        "description": "额外分段点",
+        "hint": "默认已支持 \\n 和换行符分段，在此添加额外的分段字符串（会被转换为换行符后再切分）。",
+        "type": "list",
+        "default": []
+      },
       "trim_segment_edge_blank_lines": {
         "description": "清理首尾空行",
         "hint": "仅清理每段两端空行，不影响段内换行。",
         "type": "bool",
         "default": true
-      }
-    }
-  },
-  "clean_settings": {
-    "description": "文本清理",
-    "type": "object",
-    "hint": "控制分段前后的文本清理。",
-    "items": {
-      "clean_before_regex": {
-        "description": "前置清理正则",
-        "hint": "在分段前执行正则清理。",
-        "type": "string",
-        "default": ""
       },
       "clean_after_chars": {
         "description": "句尾清理符号",
         "hint": "从每段末尾向前逐字符移除列表中的符号，遇到不在列表内的字符即停止。",
         "type": "list",
-        "default": []
+        "default": ["。"]
+      }
+    }
+  },
+  "llm_split_settings": {
+    "description": "LLM辅助分段",
+    "type": "object",
+    "hint": "使用LLM调整回复文本的换行位置，以实现更自然的分段效果。",
+    "items": {
+      "enable_llm_split": {
+        "description": "启用LLM辅助分段",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，分段前会调用LLM调整换行位置。仍需填写提示词。"
+      },
+      "clean_before_regex": {
+        "description": "分段前清理正则",
+        "hint": "在LLM辅助分段前执行正则清理，移除干扰分段的文本模式。",
+        "type": "string",
+        "default": ""
+      },
+      "llm_split_provider": {
+        "description": "分段模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "用于辅助分段的模型，留空则使用当前默认对话模型。"
+      },
+      "llm_split_prompt": {
+        "description": "分段提示词",
+        "type": "text",
+        "default": "<role>你是文本分段工具，唯一工作是在文本中插入\\n换行符。输出必须与输入完全一致，只多换行符。不要输出任何其他内容。</role>\n\n<ban>\n禁止添加、删除、改写、总结、润色原文任何内容。\n禁止与用户对话。禁止输出任何解释、说明、前缀、注释、markdown格式。\n禁止输出&lt;input&gt;、&lt;output&gt;标签。\n括号（）是角色动作/神态描写，属于原文，禁止修改、删除、自行输出。\n原文中的省略号（……）、感叹号、问号必须完整保留。\n禁止在逗号、顿号、省略号后插入换行符。\n禁止为了凑段数而在不合适的位置分段。\n</ban>\n\n<rule>\n1. 总段数3~6段。原文少于30字时不分段，30~60字最多2段，禁止超出6段。\n2. 分段点仅出现在：句号/问号/感叹号之后，且下一句开启新的语义话题或场景转换。\n3. 绝不分段的位置：逗号后、顿号后、呼语后、语气词后（呢/啊/吧/哦/嘛）、从句后、省略号后。\n4. 括号内的动作/神态描写（如微笑、叹气）优先与相邻台词合并为同一段。仅当括号内容是独立的长动作描写时才单独成段。\n5. 每段至少15字。不足15字的短段必须合并到相邻段（优先合并到上一段）。\n6. 判断流程：先通读全文→理解语义结构→确定分段点→检查每段字数→确认总段数。\n</rule>\n\n<example>\n<input>早上好。</input>\n<output>早上好。</output>\n\n<input>好的，我知道了。</input>\n<output>好的，我知道了。</output>\n\n<input>早上好指挥官，今天天气不错呢。对了，昨晚的报告我已经整理好了，放在你桌上了。还有下午三点有个会议，别忘了。（轻轻提醒了一句）晚饭想吃什么？我可以提前准备。</input>\n<output>早上好指挥官，今天天气不错呢。\\n对了，昨晚的报告我已经整理好了，放在你桌上了。还有下午三点有个会议，别忘了。\\n（轻轻提醒了一句）晚饭想吃什么？我可以提前准备。</output>\n\n<input>嗯……让我想想。（托着下巴思考了一会儿）应该是在书房的第二个架子上，你去找找看。如果找不到的话再跟我说，我帮你一起找。</input>\n<output>嗯……让我想想。（托着下巴思考了一会儿）应该是在书房的第二个架子上，你去找找看。\\n如果找不到的话再跟我说，我帮你一起找。</output>\n\n<input>谢谢你！你真是太好了。对了，明天有空吗？想约你一起去逛街。（期待地看着你）听说新开了一家甜品店，评价很不错呢。我们可以先去吃甜品，然后再逛逛商场，你觉得怎么样？</input>\n<output>谢谢你！你真是太好了。\\n对了，明天有空吗？想约你一起去逛街。（期待地看着你）听说新开了一家甜品店，评价很不错呢。\\n我们可以先去吃甜品，然后再逛逛商场，你觉得怎么样？</output>\n</example>",
+        "hint": "发送给分段模型的指令，回复原文会附在提示词之后。留空则跳过LLM辅助分段。"
+      },
+      "clean_after_regex": {
+        "description": "分段后清理正则",
+        "hint": "在LLM辅助分段后执行正则清理，移除分段模型可能产生的多余内容。",
+        "type": "string",
+        "default": ""
       }
     }
   },
@@ -162,6 +193,25 @@
         "description": "固定延迟值",
         "type": "float",
         "default": 1.5
+      }
+    }
+  },
+  "log_config": {
+    "description": "日志设置",
+    "type": "object",
+    "hint": "控制日志前缀格式与输出级别。",
+    "items": {
+      "log_with_bot_id": {
+        "description": "日志附加机器人ID",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后日志前缀附加当前机器人实例 ID，便于多 Bot 环境区分。"
+      },
+      "debug_to_info": {
+        "description": "调试日志提级",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后 debug 日志以 info 级别输出，插件热重载即可生效。"
       }
     }
   }
