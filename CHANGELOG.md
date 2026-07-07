@@ -1,5 +1,26 @@
 # 更新日志
 
+## 2.2.0
+> 2026-07-08
+
+- LLM 分段支持含非 Plain 组件的 chain（如 At），自动处理最长 Plain
+- 颜文字保护合并为单一配置项 `emoticon_protection`
+
+## 2.1.1
+> 2026-07-07
+
+- LLM 分段未应用时（chain 含非 Plain 组件等情况）不再执行 `clean_before_regex` 前置过滤
+
+## 2.1.0
+> 2026-07-06
+
+- 修复 `log_with_bot_id` 误用 `get_platform_id()`，改为 `get_self_id()` 以正确区分多 Bot 实例
+- 修复 `split_scope=all` 时 LLM 辅助分段被静默跳过的问题
+- 修复单段输出路径跳过 `_mark_bot_reply`，导致 smart_reply 状态在单/多段分支下不一致
+- 修复 `linear` 延迟策略无上限，长文本可能产生 10s+ 延迟
+- `_MAX_LOG_DELAY` 重命名为 `_MAX_DELAY`，统一应用于 log/linear 策略
+- 新增颜文字保护：分段 LLM 提示词增加 ``` 包裹颜文字的处理规则；新增 `strip_emoticon_wrappers` 配置项（默认开启），分段归一化后自动剥离反引号
+
 ## 2.0.0
 > 2026-06-13
 

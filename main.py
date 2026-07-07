@@ -9,13 +9,13 @@ from typing import List, Dict, Any
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.message_components import Plain, BaseMessageComponent, Reply, Record
-from astrbot.core.star.session_llm_manager import SessionServiceManager
+from astrbot.api.message_components import Plain, BaseMessageComponent, Reply
+from astrbot.api.provider import ProviderRequest
 
 
 class MessageSplitterPlugin(Star):
     _QUEUE_MAX_SIZE = 200
-    _MAX_LOG_DELAY = 5.0
+    _MAX_DELAY = 5.0
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -29,9 +29,9 @@ class MessageSplitterPlugin(Star):
     def _tag(self, event=None) -> str:
         if self.log_with_bot_id and event is not None:
             try:
-                return f"[SplitterW:{event.get_platform_id()}]"
-            except Exception:
-                pass
+                return f"[SplitterW:{event.get_self_id()}]"
+            except Exception as e:
+                logger.debug(f"[SplitterW] _tag 取 self_id 失败: {e}")
         return "[SplitterW]"
 
     def _log_debug(self, event: AstrMessageEvent, msg: str):
@@ -43,7 +43,8 @@ class MessageSplitterPlugin(Star):
     def _get_cfg(self, key: str, default: Any = None) -> Any:
         categories = [
             "basic_settings", "split_settings",
-            "llm_split_settings", "reply_media_settings", "delay_settings"
+            "llm_split_settings", "reply_media_settings", "delay_settings",
+            "log_config"
         ]
         for cat in categories:
             cat_obj = self.config.get(cat)
@@ -109,6 +110,17 @@ class MessageSplitterPlugin(Star):
             return
         self._remember_incoming_message(event)
 
+    @filter.on_llm_request()
+    async def inject_emoticon_protection(self, event: AstrMessageEvent, req: ProviderRequest):
+        """告知对话 LLM：颜文字需用三反引号包裹，便于后续分段 LLM 识别与剥离。"""
+        if not self._get_cfg("emoticon_protection", True):
+            return
+        req.system_prompt = (req.system_prompt or "") + (
+            "\n\n输出包含颜文字（如 >w<、(*≧ω≦*)、(≧▽≦) 等）时，"
+            "必须用三反引号紧贴包裹，例如：今天真好```>w<```呢。"
+            "禁止在三反引号内部或紧邻外侧插入空格、换行。"
+        )
+
     @filter.on_decorating_result(priority=-100000000000000000)
     async def on_decorating_result(self, event: AstrMessageEvent):
         """LLM 回复渲染钩子：负责文本清理、LLM 辅助分段、分段切分、Reply 处理与逐段延迟发送。"""
@@ -136,7 +148,7 @@ class MessageSplitterPlugin(Star):
 
         split_scope = self._get_cfg("split_scope", "llm_only")
         if split_scope == "llm_only" and not result.is_llm_result():
-            self._log_debug(event, f"跳过: 非LLM回复 (scope={split_scope})")
+            self._log_debug(event, "跳过: 非LLM回复")
             return
 
         # --- 2. 长度校验 ---
@@ -153,22 +165,20 @@ class MessageSplitterPlugin(Star):
         raw_text = ''.join(c.text for c in result.chain if isinstance(c, Plain))
         self._log_debug(event, f"原文本: {raw_text.replace(chr(10), chr(92)+ 'n')}")
 
-        # --- 3. 分段前清理 ---
-        clean_regex = self._get_cfg("clean_before_regex", "")
-        if clean_regex:
-            for comp in result.chain:
-                if isinstance(comp, Plain) and comp.text:
-                    comp.text = re.sub(clean_regex, "", comp.text, flags=re.DOTALL)
-
-        # --- 4. LLM辅助分段 ---
+        # --- 3+4. LLM 辅助分段（含分段前清理） ---
         if self._get_cfg("enable_llm_split", False):
             llm_split_prompt = self._get_cfg("llm_split_prompt", "")
         else:
             llm_split_prompt = ""
-        if llm_split_prompt and split_scope == "llm_only" and result.is_llm_result():
-            has_non_plain = any(not isinstance(c, Plain) for c in result.chain)
-            if not has_non_plain:
-                pre_split_text = "".join(c.text for c in result.chain if isinstance(c, Plain) and c.text)
+        if llm_split_prompt and result.is_llm_result():
+            plain_items = [(i, c) for i, c in enumerate(result.chain) if isinstance(c, Plain) and c.text]
+            if plain_items:
+                clean_regex = self._get_cfg("clean_before_regex", "")
+                if clean_regex:
+                    for _, comp in plain_items:
+                        comp.text = re.sub(clean_regex, "", comp.text, flags=re.DOTALL)
+                target_idx, target_comp = max(plain_items, key=lambda x: len(x[1].text))
+                pre_split_text = target_comp.text
                 if pre_split_text.strip():
                     try:
                         llm_split_provider = self._get_cfg("llm_split_provider", "")
@@ -188,7 +198,7 @@ class MessageSplitterPlugin(Star):
                                 if clean_after_regex:
                                     processed_text = re.sub(clean_after_regex, "", processed_text)
                                 if processed_text.strip():
-                                    result.chain = [Plain(processed_text)]
+                                    target_comp.text = processed_text
                                     logger.info(f"{self._tag(event)} LLM分段: {len(pre_split_text)} -> {len(processed_text)} 字符")
                                     self._log_debug(event, f"LLM分段后: {processed_text.replace(chr(10), chr(92)+ 'n')}")
                     except Exception as e:
@@ -203,6 +213,8 @@ class MessageSplitterPlugin(Star):
                 for sp in self._get_cfg("extra_split_points", []):
                     if sp and sp != "\n":
                         text = text.replace(sp, "\n")
+                if self._get_cfg("emoticon_protection", True):
+                    text = re.sub(r"```(.+?)```", r"\1", text, flags=re.DOTALL)
                 comp.text = text
 
         # --- 6. 切分 ---
@@ -238,6 +250,8 @@ class MessageSplitterPlugin(Star):
                         comp.text = comp.text.rstrip(clean_after_chars)
 
         if len(segments) <= 1 and not at_needs_proc:
+            if enable_reply and enable_smart and source_id:
+                self._mark_bot_reply(event, source_id)
             final = segments[0] if segments else []
             result.chain.clear(); result.chain.extend(final); return
 
@@ -248,7 +262,6 @@ class MessageSplitterPlugin(Star):
             if not text_content.strip(" \t\r\n​") and not any(not isinstance(c, Plain) for c in seg_chain): continue
 
             try:
-                seg_chain = await self._process_tts_for_segment(event, seg_chain)
                 self._log_segment(event, i + 1, len(segments), seg_chain, "主动发送")
                 mc = MessageChain(); mc.chain = seg_chain
                 await self.context.send_message(event.unified_msg_origin, mc)
@@ -271,35 +284,11 @@ class MessageSplitterPlugin(Star):
         if f_p and f_p.text: f_p.text = re.sub(r'^(?:[ \t]*\r?\n)+', '', f_p.text)
         if l_p and l_p.text: l_p.text = re.sub(r'(?:\r?\n[ \t]*)+$', '', l_p.text)
 
-    async def _process_tts_for_segment(self, event: AstrMessageEvent, segment: List[BaseMessageComponent]) -> List[BaseMessageComponent]:
-        if not self._get_cfg("enable_tts_for_segments", True): return segment
-        try:
-            all_cfg = self.context.get_config(event.unified_msg_origin)
-            tts_cfg = all_cfg.get("provider_tts_settings", {})
-            if not tts_cfg.get("enable", False): return segment
-            tts_prov = self.context.get_using_tts_provider(event.unified_msg_origin)
-            if not tts_prov or not await SessionServiceManager.should_process_tts_request(event): return segment
-            if random.random() > float(tts_cfg.get("trigger_probability", 1.0)): return segment
-            dual = tts_cfg.get("dual_output", False)
-            new_seg = []
-            for comp in segment:
-                if isinstance(comp, Plain) and len(comp.text) > 1:
-                    try:
-                        path = await tts_prov.get_audio(comp.text)
-                        if path:
-                            new_seg.append(Record(file=path, url=path))
-                            if dual: new_seg.append(comp)
-                        else: new_seg.append(comp)
-                    except Exception: new_seg.append(comp)
-                else: new_seg.append(comp)
-            return new_seg
-        except Exception: return segment
-
     def calculate_delay(self, text: str) -> float:
         strategy = self._get_cfg("delay_strategy", "linear")
         if strategy == "random": return random.uniform(self._get_cfg("random_min", 1.0), self._get_cfg("random_max", 3.0))
-        if strategy == "log": return min(self._get_cfg("log_base", 0.5) + self._get_cfg("log_factor", 0.8) * math.log(len(text) + 1), self._MAX_LOG_DELAY)
-        if strategy == "linear": return self._get_cfg("linear_base", 0.5) + (len(text) * self._get_cfg("linear_factor", 0.1))
+        if strategy == "log": return min(self._get_cfg("log_base", 0.5) + self._get_cfg("log_factor", 0.8) * math.log(len(text) + 1), self._MAX_DELAY)
+        if strategy == "linear": return min(self._get_cfg("linear_base", 0.5) + (len(text) * self._get_cfg("linear_factor", 0.1)), self._MAX_DELAY)
         return self._get_cfg("fixed_delay", 1.5)
 
     def _split_chain(self, chain: List[BaseMessageComponent], strategies: Dict[str, str]) -> List[List[BaseMessageComponent]]:
